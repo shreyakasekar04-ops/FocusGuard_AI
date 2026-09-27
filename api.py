@@ -312,28 +312,96 @@ def receive_usage():
             "message": str(e)
         }), 500
 
-
-# -------------------------------------------------
-# RUN FLASK SERVER
-# -------------------------------------------------
-
-if __name__ == "__main__":
-
-    print("======================================")
-    print("🛡️ FocusGuard AI API")
-    print("======================================")
-
-    print("Starting Flask server...")
-
-    print("Android Emulator URL:")
-    print("http://10.0.2.2:5000")
-
-    print("======================================")
-
-
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=True
+        # -------------------------------------------------
+        # GET LATEST ANDROID USAGE FOR STREAMLIT
+        # -------------------------------------------------
+        
+        @app.route("/latest_usage", methods=["GET"])
+        def latest_usage():
+        
+            try:
+        
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+        
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS mobile_usage (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        screen_time REAL NOT NULL,
+                        social_media_time REAL NOT NULL,
+                        productivity_time REAL DEFAULT 0,
+                        productivity_level TEXT DEFAULT 'LOW',
+                        date TEXT NOT NULL
+                    )
+                """)
+        
+                cursor.execute("""
+                    SELECT
+                        screen_time,
+                        social_media_time,
+                        productivity_time,
+                        productivity_level,
+                        date
+                    FROM mobile_usage
+                    ORDER BY id DESC
+                    LIMIT 1
+                """)
+        
+                result = cursor.fetchone()
+        
+                conn.close()
+        
+                if result:
+        
+                    return jsonify({
+                        "status": "success",
+                        "screen_time": result[0],
+                        "social_media_time": result[1],
+                        "productivity_time": result[2],
+                        "productivity_level": result[3],
+                        "date": result[4]
+                    }), 200
+        
+                return jsonify({
+                    "status": "success",
+                    "screen_time": 0,
+                    "social_media_time": 0,
+                    "productivity_time": 0,
+                    "productivity_level": "LOW",
+                    "date": None
+                }), 200
+        
+            except Exception as e:
+        
+                print("❌ LATEST USAGE ERROR:", str(e))
+        
+                return jsonify({
+                    "status": "error",
+                    "message": str(e)
+                }), 500
+        
+        
+        # -------------------------------------------------
+        # RUN FLASK SERVER
+        # -------------------------------------------------
+        
+        if __name__ == "__main__":
+        
+            print("======================================")
+            print("🛡️ FocusGuard AI API")
+            print("======================================")
+        
+            print("Starting Flask server...")
+        
+            print("Android Emulator URL:")
+            print("http://10.0.2.2:5000")
+        
+            print("======================================")
+        
+        
+            app.run(
+                host="0.0.0.0",
+                port=5000,
+                debug=True
     )
     
