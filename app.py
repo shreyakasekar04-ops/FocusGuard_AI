@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 import os
 import time
+import re
 import io
 import requests
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -87,6 +88,15 @@ def initialize_database():
         )
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_goals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            daily_limit REAL DEFAULT 5.0,
+            updated_at TEXT
+        )
+    """)
+
     # Add profession if old database does not have it
     try:
         cursor.execute(
@@ -119,6 +129,21 @@ def create_user(
     hashed_password = generate_password_hash(password)
 
     try:
+        # Prevent duplicate usernames.
+        cursor.execute(
+            "SELECT 1 FROM users WHERE LOWER(username) = LOWER(?) LIMIT 1",
+            (username.strip(),)
+        )
+        if cursor.fetchone():
+            return "username_exists"
+
+        # Prevent the same email from being registered again.
+        cursor.execute(
+            "SELECT 1 FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+            (email.strip(),)
+        )
+        if cursor.fetchone():
+            return "email_exists"
 
         cursor.execute("""
             INSERT INTO users
@@ -131,26 +156,53 @@ def create_user(
             )
             VALUES (?, ?, ?, ?, ?)
         """, (
-            username,
+            username.strip(),
             hashed_password,
-            email,
+            email.strip(),
             role,
             profession
         ))
 
         conn.commit()
-
         return True
 
     except sqlite3.IntegrityError:
-
-        return False
+        return "username_exists"
 
     finally:
-
         conn.close()
 
+
+def is_valid_email(email):
+    """Validate the basic structure of an email address.
+
+    This checks format only; it does not claim that the mailbox actually exists.
+    """
+    email = email.strip()
+    pattern = r"^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
+    return re.fullmatch(pattern, email) is not None
+
 def check_user(username, password):
+
+    # Developer access is role-based and uses environment secrets.
+    # The credentials are NOT shown in the normal user interface.
+    developer_username = os.getenv("FOCUSGUARD_DEVELOPER_USERNAME", "")
+    developer_password = os.getenv("FOCUSGUARD_DEVELOPER_PASSWORD", "")
+
+    if (
+        developer_username
+        and developer_password
+        and username.strip() == developer_username
+        and password == developer_password
+    ):
+        return (
+            0,
+            developer_username,
+            "",
+            "",
+            "Developer",
+            "Developer"
+        )
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -304,6 +356,209 @@ def get_all_analysis():
 
 
 # =========================================================
+# PERSONAL GOALS / PROGRESS FUNCTIONS
+# =========================================================
+
+def save_user_goal(username, daily_limit):
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT INTO user_goals
+        (username, daily_limit, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(username) DO UPDATE SET
+            daily_limit = excluded.daily_limit,
+            updated_at = excluded.updated_at
+    """, (
+        username,
+        daily_limit
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_user_goal(username, default=5.0):
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT daily_limit
+        FROM user_goals
+        WHERE username = ?
+    """, (username,))
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row[0] is not None:
+        return float(row[0])
+
+    return float(default)
+
+
+def get_latest_user_analysis(username):
+
+    history = get_user_analysis(username)
+
+    if history.empty:
+        return None
+
+    history["date"] = pd.to_datetime(
+        history["date"],
+        errors="coerce"
+    )
+    history = history.dropna(subset=["date"]).sort_values("date")
+
+    if history.empty:
+        return None
+
+    return history.iloc[-1]
+
+
+def get_focus_checkin_streak(username):
+    history = get_user_analysis(username)
+
+    if history.empty:
+        return 0
+
+    dates = pd.to_datetime(
+        history["date"],
+        errors="coerce"
+    ).dropna().dt.date
+
+    unique_dates = sorted(set(dates), reverse=True)
+
+    if not unique_dates:
+        return 0
+
+    streak = 1
+
+    for i in range(1, len(unique_dates)):
+        difference = (
+            unique_dates[i - 1] - unique_dates[i]
+        ).days
+
+        if difference == 1:
+            streak += 1
+        else:
+            break
+
+    return streak
+
+
+def get_achievements(username):
+    history = get_user_analysis(username)
+
+    if history.empty:
+        return []
+
+    history["date"] = pd.to_datetime(
+        history["date"],
+        errors="coerce"
+    )
+    history = history.dropna(subset=["date"]).sort_values("date")
+
+    achievements = []
+
+    if len(history) >= 1:
+        achievements.append("🥇 First Focus Check-in")
+
+    if len(history) >= 3:
+        achievements.append("🔥 3 Analysis Milestone")
+
+    if len(history) >= 2:
+        if float(history.iloc[-1]["screen_time"]) < float(history.iloc[0]["screen_time"]):
+            achievements.append("📉 Screen Time Reduced")
+
+        if float(history.iloc[-1]["social_media_time"]) < float(history.iloc[0]["social_media_time"]):
+            achievements.append("📵 Social Media Reduced")
+
+    if (history["productivity"] >= 4).any():
+        achievements.append("🎯 High Productivity")
+
+    if (history["risk_score"] <= 40).any():
+        achievements.append("🟢 Low Risk Achieved")
+
+    return achievements
+
+
+def get_smart_reminder_recommendation(username, daily_limit):
+    latest = get_latest_user_analysis(username)
+
+    if latest is None:
+        return {
+            "activity": "📚 Focus Session",
+            "duration": 25,
+            "reason": "Complete your first analysis so FocusGuard can personalize your reminder.",
+            "priority": "Getting Started"
+        }
+
+    screen = float(latest["screen_time"])
+    social = float(latest["social_media_time"])
+    productivity = float(latest["productivity"])
+    risk = float(latest["risk_score"])
+
+    if screen > daily_limit:
+        return {
+            "activity": "🚶 Take a Break",
+            "duration": 15,
+            "reason": f"Your latest screen time is {screen:.1f} hours, above your {daily_limit:.1f}-hour daily goal.",
+            "priority": "High Priority"
+        }
+
+    if social >= 4:
+        return {
+            "activity": "📵 Stop Social Media",
+            "duration": 20,
+            "reason": f"Your latest social media usage is {social:.1f} hours, which is high.",
+            "priority": "High Priority"
+        }
+
+    if screen >= 8:
+        return {
+            "activity": "🚶 Take a Break",
+            "duration": 15,
+            "reason": f"Your latest screen time is {screen:.1f} hours, so a break is recommended.",
+            "priority": "High Priority"
+        }
+
+    if productivity <= 2:
+        return {
+            "activity": "📚 Focus Session",
+            "duration": 25,
+            "reason": "Your latest productivity level is low. A short focused session can help you restart productively.",
+            "priority": "Focus Support"
+        }
+
+    if risk >= 70:
+        return {
+            "activity": "🧘 Relax / Meditation",
+            "duration": 10,
+            "reason": f"Your latest risk score is {risk:.0f}/100. A short reset is recommended.",
+            "priority": "Risk Support"
+        }
+
+    if social >= 2 or screen >= 5 or productivity == 3:
+        return {
+            "activity": "🚶 Take a Break",
+            "duration": 10,
+            "reason": "Your latest analysis shows moderate digital usage. A short break can help maintain balance.",
+            "priority": "Balance"
+        }
+
+    return {
+        "activity": "📚 Focus Session",
+        "duration": 25,
+        "reason": "Your latest analysis looks balanced. A focused session can help you maintain your progress.",
+        "priority": "Maintain Progress"
+    }
+
+
+# =========================================================
 # REMINDER FUNCTIONS
 # =========================================================
 
@@ -382,57 +637,28 @@ def get_automatic_device_usage():
 
     try:
 
-        # -------------------------------------------------
-        # PHONE DATA
-        # -------------------------------------------------
-
-        phone_df = pd.read_sql_query(
-            """
-            SELECT
-                COALESCE(SUM(screen_time), 0)
-                    AS screen_time,
-
-                COALESCE(SUM(social_media_time), 0)
-                    AS social_media_time,
-
-                COALESCE(SUM(productivity_time), 0)
-                    AS productivity_time
-
-            FROM mobile_usage
-            """,
-            conn
-        )
-
-        phone_screen = float(
-            phone_df.iloc[0]["screen_time"]
-        )
-
-        phone_social = float(
-            phone_df.iloc[0]["social_media_time"]
-        )
-
-        phone_productivity = float(
-            phone_df.iloc[0]["productivity_time"]
-        )
-
-
-        # -------------------------------------------------
-        # PHONE PRODUCTIVITY LEVEL
+                # PHONE DATA FROM PUBLIC RENDER API
         # -------------------------------------------------
 
-        if phone_productivity >= 120:
-
-            phone_productivity_level = "HIGH"
-
-        elif phone_productivity >= 60:
-
-            phone_productivity_level = "MODERATE"
-
-        else:
-
+        try:
+            username = st.session_state.get("username", "default_user")
+            response = requests.get(
+                "https://focusguard-ai-9.onrender.com/latest_usage",
+                params={"username": username},
+                timeout=30
+            )
+            if response.status_code == 200:
+                phone_data = response.json()
+                phone_screen = float(phone_data.get("screen_time", 0))
+                phone_social = float(phone_data.get("social_media_time", 0))
+                phone_productivity = float(phone_data.get("productivity_time", 0))
+                phone_productivity_level = phone_data.get("productivity_level", "LOW")
+            else:
+                phone_screen = phone_social = phone_productivity = 0.0
+                phone_productivity_level = "LOW"
+        except Exception:
+            phone_screen = phone_social = phone_productivity = 0.0
             phone_productivity_level = "LOW"
-
-
         # -------------------------------------------------
         # LAPTOP DATA
         # -------------------------------------------------
@@ -636,189 +862,73 @@ if not st.session_state["logged_in"]:
     # =====================================================
 
     if login_option == "📝 Sign Up":
-
         st.subheader("📝 Create Your Account")
+        username = st.text_input("👤 Username", key="signup_username")
+        email = st.text_input("📧 Email", key="signup_email")
+        password = st.text_input("🔐 Password", type="password", key="signup_password")
+        confirm_password = st.text_input("🔑 Confirm Password", type="password", key="signup_confirm_password")
+        role = st.selectbox("Choose your profile", ["🎓 Student", "💼 Employee"], key="signup_role")
 
-        username = st.text_input(
-            "👤 Username"
-        )
+        if role == "🎓 Student":
+            profession = st.selectbox(
+                "🎓 Choose your field of study",
+                ["Select field", "💻 Information Technology", "📊 Data Science", "💻 Computer Science", "🎓 BCA", "⚙️ BTech / BE", "🖥️ Computer Applications", "📚 Other"],
+                key="signup_field"
+            )
+        else:
+            profession = st.selectbox(
+                "💼 Choose your profession",
+                ["Select profession", "👨‍💻 IT / Software", "📊 Data / Analytics", "👩‍🏫 Teacher / Education", "📈 Business / Marketing", "🎨 Design / Creative", "🩺 Healthcare", "⚖️ Law", "💰 Finance / Accounting", "🧑‍💼 Other"],
+                key="signup_profession"
+            )
 
-        email = st.text_input(
-            "📧 Email"
-        )
-
-        password = st.text_input(
-            "🔐 Password",
-            type="password"
-        )
-
-        confirm_password = st.text_input(
-            "🔑 Confirm Password",
-            type="password"
-        )
-
-        role = st.selectbox(
-            "Choose your profile",
-            [
-                "🎓 Student",
-                "💼 Employee"
-            ]
-        )
-
-        profession = st.selectbox(
-            "💼 Choose your profession",
-            [
-                "Select profession",
-                "👨‍💻 IT / Software",
-                "📊 Data / Analytics",
-                "👩‍🏫 Teacher / Education",
-                "📈 Business / Marketing",
-                "🎨 Design / Creative",
-                "🩺 Healthcare",
-                "⚖️ Law",
-                "💰 Finance / Accounting",
-                "🎓 Student",
-                "🧑‍💼 Other"
-            ]
-        )
-
-
-        if st.button(
-            "🚀 Create Account"
-        ):
-
+        if st.button("🚀 Create Account", key="create_account_button"):
             if not username.strip():
-
-                st.warning(
-                    "⚠️ Please enter username."
-                )
-
+                st.warning("⚠️ Please enter username.")
             elif not email.strip():
-
-                st.warning(
-                    "⚠️ Please enter email."
-                )
-
-            elif "@" not in email:
-
-                st.warning(
-                    "⚠️ Please enter a valid email."
-                )
-
+                st.warning("⚠️ Please enter email.")
+            elif not is_valid_email(email):
+                st.warning("⚠️ Please enter a valid email address, for example name@gmail.com.")
             elif not password:
-
-                st.warning(
-                    "⚠️ Please enter password."
-                )
-
+                st.warning("⚠️ Please enter password.")
             elif password != confirm_password:
-
-                st.error(
-                    "❌ Passwords do not match."
-                )
-
-            elif profession == "Select profession":
-
-                st.warning(
-                    "⚠️ Please select your profession."
-                )
-
+                st.error("❌ Passwords do not match.")
+            elif role == "🎓 Student" and profession == "Select field":
+                st.warning("⚠️ Please select your field of study.")
+            elif role == "💼 Employee" and profession == "Select profession":
+                st.warning("⚠️ Please select your profession.")
             else:
-
-                selected_role = (
-                    "Student"
-                    if role == "🎓 Student"
-                    else "Employee"
-                )
-
-                success = create_user(
-                    username.strip(),
-                    password,
-                    email.strip(),
-                    selected_role,
-                    profession
-                )
-
-                if success:
-
-                    st.success(
-                        "✅ Account created successfully! "
-                        "Now login."
-                    )
-
+                selected_role = "Student" if role == "🎓 Student" else "Employee"
+                success = create_user(username.strip(), password, email.strip(), selected_role, profession)
+                if success is True:
+                    st.success("✅ Account created successfully! Now login.")
+                elif success == "email_exists":
+                    st.error("❌ This email is already registered. Please use another email or login.")
                 else:
+                    st.error("❌ This username is already registered. Please choose another username.")
 
-                    st.error(
-                        "❌ Username already exists."
-                    )
-
-
-    # =====================================================
     # LOGIN
     # =====================================================
-
     else:
+        st.subheader("Welcome Back 👋")
+        st.write("Sign in to continue to your FocusGuard AI dashboard.")
+        username = st.text_input("👤 Username", key="login_username")
+        password = st.text_input("🔐 Password", type="password", key="login_password")
 
-        st.subheader(
-            "Welcome Back 👋"
-        )
-
-        st.write(
-            "Sign in to continue to your FocusGuard AI dashboard."
-        )
-
-        username = st.text_input(
-            "👤 Username"
-        )
-
-        password = st.text_input(
-            "🔐 Password",
-            type="password"
-        )
-
-
-        if st.button(
-            "🔓 Login"
-        ):
-
+        if st.button("🔓 Login", key="login_button"):
             if not username.strip() or not password:
-
-                st.warning(
-                    "⚠️ Please enter username and password."
-                )
-
+                st.warning("⚠️ Please enter username and password.")
             else:
-
-                user = check_user(
-                    username.strip(),
-                    password
-                )
-
+                user = check_user(username.strip(), password)
                 if user:
-
                     st.session_state["logged_in"] = True
-
                     st.session_state["username"] = user[1]
-
                     st.session_state["role"] = user[4]
-
-                    st.session_state["profession"] = (
-                        user[5]
-                        if user[5]
-                        else ""
-                    )
-
-                    st.success(
-                        "✅ Login successful!"
-                    )
-
+                    st.session_state["profession"] = user[5] if user[5] else ""
+                    st.success("✅ Login successful!")
                     st.rerun()
-
                 else:
-
-                    st.error(
-                        "❌ Invalid username or password."
-                    )
+                    st.error("❌ Invalid username or password.")
 
     st.stop()
 
@@ -906,22 +1016,21 @@ st.sidebar.write(
     f"Profession: {st.session_state['profession']}"
 )
 
-st.sidebar.divider()
-
-# =========================================================
-# ACCESS MODE
-# =========================================================
-
-access_mode = st.sidebar.radio(
-    "🔐 Access Mode",
-    [
-        "👤 User",
-        "🔐 Developer"
-    ]
-)
+# Developer controls are intentionally NOT rendered here.
+# Only the authenticated Developer role can open the
+# Developer Panel.
 
 st.sidebar.divider()
 
+# =========================================================
+# ROLE-BASED PAGE NAVIGATION
+# =========================================================
+#
+# Normal Student/Employee accounts never see an Access Mode
+# selector and can never switch themselves to Developer mode.
+# Developer access is granted only when the authenticated
+# account has role="Developer".
+#
 # =========================================================
 # PAGE NAVIGATION STATE
 # =========================================================
@@ -960,8 +1069,8 @@ if (
 
     st.session_state["page_selector"] = page_options[0]
 
-# Developer mode
-if access_mode == "🔐 Developer":
+# Developer access is based only on the authenticated role.
+if st.session_state.get("role") == "Developer":
 
     page = "🔐 Developer"
 
@@ -1109,6 +1218,63 @@ if page == "🏠 Dashboard":
         "Detailed device usage is available under Device Analysis. "
         "Dataset results are available under Data Analysis."
     )
+
+    # =========================================================
+    # PERSONAL ENGAGEMENT / GOALS
+    # =========================================================
+
+    latest = get_latest_user_analysis(
+        st.session_state["username"]
+    )
+
+    if latest is not None:
+        st.divider()
+        st.subheader("🎯 Your Personal Progress")
+
+        goal = get_user_goal(
+            st.session_state["username"],
+            5.0
+        )
+        current_screen = float(latest["screen_time"])
+        goal_percent = min(100.0, (current_screen / goal) * 100) if goal > 0 else 0
+
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.metric("⏰ Screen-Time Goal", f"{goal:.1f} hrs")
+        with g2:
+            st.metric("📱 Latest Usage", f"{current_screen:.1f} hrs")
+        with g3:
+            streak = get_focus_checkin_streak(st.session_state["username"])
+            st.metric("🔥 Focus Check-in Streak", f"{streak} day(s)")
+
+        st.progress(goal_percent / 100)
+
+        if current_screen <= goal:
+            st.success("✅ You are within your latest screen-time goal. Keep going!")
+        else:
+            st.warning("⚠️ Your latest screen time is above your goal. Try the recommended reminder in Smart Reminders.")
+
+        achievements = get_achievements(
+            st.session_state["username"]
+        )
+
+        st.subheader("🏆 Achievements")
+        if achievements:
+            st.write(" •  ".join(achievements))
+        else:
+            st.info("Complete an analysis to start earning achievements.")
+
+        st.subheader("💡 Today's Personal Tip")
+        recommendation = get_smart_reminder_recommendation(
+            st.session_state["username"],
+            goal
+        )
+        st.info(
+            f"{recommendation['reason']} Recommended: {recommendation['activity']} for {recommendation['duration']} minutes."
+        )
+    else:
+        st.divider()
+        st.info("📌 Complete your first analysis to unlock personal goals, achievements and smart recommendations.")
 
 elif page == "📱 Device Analysis":
     show_page_header()
@@ -1286,37 +1452,10 @@ elif page == "📊 Data Analysis":
             )
 
 
-    # =========================================================
-    # PRODUCTIVITY DATASET ANALYSIS
-    # =========================================================
-
-    if (
-        not df.empty
-        and
-        "Productivity_Level" in df.columns
-    ):
-
-        st.subheader(
-            "🎯 Productivity Level Analysis"
-        )
-
-        productivity_counts = (
-            df["Productivity_Level"]
-            .value_counts()
-        )
-
-        st.bar_chart(
-            productivity_counts
-        )
-
-        most_common_productivity = (
-            productivity_counts.idxmax()
-        )
-
-        st.success(
-            f"🎯 Most common productivity level: "
-            f"{most_common_productivity}"
-        )
+    st.info(
+        "📌 This page shows dataset-level summary only. Your personal progress "
+        "graphs are available under 📜 History and use only your own saved analyses."
+    )
 
 
 elif page == "👤 My Data":
@@ -1337,7 +1476,7 @@ elif page == "👤 My Data":
     # LOAD AUTOMATIC DEVICE DATA
     # ---------------------------------------------------------
 
-    if st.button("📱💻 Use Automatic Device Data"):
+    if st.button("📱💻 Use Automatic Device Data", key="auto_device_data_button"):
 
         st.session_state["screen_time_input"] = round(
             combined_screen_hours, 2
@@ -1416,7 +1555,7 @@ elif page == "👤 My Data":
             username = st.session_state.get("username", "default_user")
 
             requests.post(
-                "http://127.0.0.1:5000/set_limit",
+                "https://focusguard-ai-9.onrender.com/set_limit",
                 json={
                     "username": username,
                     "daily_limit": daily_limit
@@ -1426,6 +1565,13 @@ elif page == "👤 My Data":
 
         except Exception as e:
             print("Daily limit API connection error:", e)
+
+        # Store the user's personal screen-time goal locally as well.
+        save_user_goal(
+            st.session_state["username"],
+            daily_limit
+        )
+
         st.session_state["analysis_done"] = True
         st.session_state["analysis_saved"] = False
         st.rerun()
@@ -1697,15 +1843,69 @@ elif page == "🎓 Smart Learning":
     }
 
 
+    field_suggestion_map = {
+        "💻 Information Technology": [
+            "🤖 Generative AI",
+            "🐍 Python & Automation",
+            "🌐 Advanced Web Development",
+            "🔐 Cybersecurity",
+            "☁️ Cloud Computing",
+            "💼 Interview & Placement Skills"
+        ],
+        "📊 Data Science": [
+            "🐍 Python for Data Science",
+            "📈 Power BI & Data Visualization",
+            "🧠 Machine Learning",
+            "🗄️ SQL",
+            "🤖 Generative AI for Data Analysis",
+            "💼 Data Analyst Interview Skills"
+        ],
+        "💻 Computer Science": [
+            "🐍 Python Programming",
+            "🧠 Data Structures & Algorithms",
+            "🌐 Web Development",
+            "🗄️ Database Management",
+            "🔐 Cybersecurity",
+            "☁️ Cloud Computing"
+        ],
+        "🎓 BCA": [
+            "🐍 Python",
+            "🌐 Web Development",
+            "🗄️ SQL & Databases",
+            "📊 Data Analytics",
+            "🤖 Generative AI",
+            "💼 Career & Interview Skills"
+        ],
+        "⚙️ BTech / BE": [
+            "🧠 Machine Learning",
+            "☁️ Cloud Computing",
+            "🔐 Cybersecurity",
+            "💻 Software Development",
+            "🤖 Generative AI",
+            "💼 Technical Interview Skills"
+        ],
+        "🖥️ Computer Applications": [
+            "🐍 Python",
+            "🌐 Web Development",
+            "🗄️ Database Management",
+            "📊 Data Analytics",
+            "☁️ Cloud Computing",
+            "💼 Career Skills"
+        ]
+    }
+
     suggestions = suggestion_map.get(
         user_profession,
-        [
-            "🤖 Generative AI",
-            "💻 Digital Skills",
-            "📊 Data Analytics",
-            "🗣️ Communication Skills",
-            "☁️ Cloud Computing"
-        ]
+        field_suggestion_map.get(
+            user_profession,
+            [
+                "🤖 Generative AI",
+                "💻 Digital Skills",
+                "📊 Data Analytics",
+                "🗣️ Communication Skills",
+                "☁️ Cloud Computing"
+            ]
+        )
     )
 
 
@@ -1720,14 +1920,49 @@ elif page == "🔔 Smart Reminders":
     show_page_header()
 
     # =========================================================
-    # SMART REMINDER
+    # PERSONALIZED SMART REMINDER
     # =========================================================
 
     st.divider()
-
-    st.subheader(
-        "🔔 Smart Reminder"
+    st.subheader("🔔 Personalized Smart Reminder")
+    st.caption(
+        "FocusGuard chooses a useful reminder from your own latest analysis "
+        "instead of giving every user the same reminder."
     )
+
+    username = st.session_state["username"]
+    personal_goal = get_user_goal(username, 5.0)
+    recommendation = get_smart_reminder_recommendation(
+        username,
+        personal_goal
+    )
+
+    st.markdown("### ⭐ Recommended for You")
+
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.metric("🔔 Reminder", recommendation["activity"])
+    with r2:
+        st.metric("⏱️ Duration", f"{recommendation['duration']} min")
+    with r3:
+        st.metric("🎯 Priority", recommendation["priority"])
+
+    st.info(
+        f"💡 Why this reminder? {recommendation['reason']}"
+    )
+
+    if st.button("⭐ Set Recommended Reminder", use_container_width=True):
+        save_reminder(
+            username,
+            recommendation["activity"],
+            recommendation["duration"]
+        )
+        st.success(
+            f"✅ Your personalized {recommendation['activity']} reminder was saved for {recommendation['duration']} minutes."
+        )
+
+    st.divider()
+    st.subheader("⚙️ Choose Your Own Reminder")
 
     reminder_option = st.selectbox(
         "Choose an activity",
@@ -1740,71 +1975,266 @@ elif page == "🔔 Smart Reminders":
             "🏃 Exercise",
             "📵 Stop Social Media",
             "😴 Sleep / Digital Detox"
-        ]
+        ],
+        key="manual_reminder_option"
     )
 
-
     if reminder_option != "No Reminder":
-
         reminder_minutes = st.number_input(
             "Reminder duration (minutes)",
             min_value=1,
             max_value=120,
             value=5,
-            step=1
+            step=1,
+            key="manual_reminder_duration"
         )
 
-
-        if st.button(
-            "🔔 Set Reminder"
-        ):
-
+        if st.button("🔔 Save Custom Reminder", key="save_custom_reminder"):
             save_reminder(
-                st.session_state["username"],
+                username,
                 reminder_option,
                 reminder_minutes
             )
-
             st.success(
-                f"✅ Reminder saved for "
-                f"{reminder_minutes} minutes."
+                f"✅ Custom reminder saved for {reminder_minutes} minutes."
             )
+
+    saved_reminders = get_reminders(username)
+
+    if not saved_reminders.empty:
+        st.divider()
+        st.subheader("📋 My Saved Reminders")
+
+        reminder_table = saved_reminders.copy()
+        reminder_table["date"] = pd.to_datetime(
+            reminder_table["date"],
+            errors="coerce"
+        )
+        reminder_table["date"] = reminder_table["date"].dt.strftime(
+            "%d %b %Y, %I:%M %p"
+        )
+        reminder_table.columns = [
+            "ID",
+            "Reminder",
+            "Duration (min)",
+            "Saved On"
+        ]
+
+        st.dataframe(
+            reminder_table,
+            use_container_width=True,
+            hide_index=True
+        )
 
 
 elif page == "📜 History":
     show_page_header()
 
     # =========================================================
-    # MY PREVIOUS ANALYSIS
+    # MY USAGE HISTORY & PROGRESS
     # =========================================================
 
     st.divider()
-
-    st.subheader(
-        "📊 My Previous Analysis"
+    st.subheader("📈 My Usage Progress")
+    st.caption(
+        "Track your own saved analyses over time. This section uses only "
+        "your FocusGuard AI results — not the survey dataset."
     )
 
-    previous_data = get_user_analysis(
+    history = get_user_analysis(
         st.session_state["username"]
     )
 
+    if history.empty:
+        st.info(
+            "📭 No previous analysis is available yet. "
+            "Complete your first analysis from My Data to start tracking progress."
+        )
+    else:
+        # Convert stored dates and show oldest analysis first for a timeline.
+        history["date"] = pd.to_datetime(
+            history["date"],
+            errors="coerce"
+        )
+        history = history.dropna(subset=["date"]).sort_values("date")
 
-    if not previous_data.empty:
+        history_display = history.copy()
+        history_display["Analysis"] = [
+            f"Analysis {i + 1}"
+            for i in range(len(history_display))
+        ]
+
+        st.subheader("📊 Screen Time & Social Media Trend")
+        st.caption(
+            "Higher line = more hours used. A downward line means your usage decreased "
+            "compared with earlier analyses."
+        )
+
+        usage_chart = history_display.set_index("Analysis")[[
+            "screen_time",
+            "social_media_time"
+        ]].rename(columns={
+            "screen_time": "Screen Time (hours)",
+            "social_media_time": "Social Media Time (hours)"
+        })
+
+        st.line_chart(usage_chart, use_container_width=True)
+
+        st.subheader("🎯 Productivity Progress")
+        st.caption(
+            "Productivity is shown on your 1–5 scale. Higher values mean a higher "
+            "self-reported productivity level."
+        )
+
+        productivity_chart = history_display.set_index("Analysis")[[
+            "productivity"
+        ]].rename(columns={
+            "productivity": "Productivity Level (1–5)"
+        })
+
+        st.line_chart(
+            productivity_chart,
+            use_container_width=True
+        )
+
+        st.subheader("🧠 Risk Score Progress")
+        st.caption(
+            "Risk score is tracked from 0 to 100. A lower score means fewer risk points "
+            "were detected by the FocusGuard rules."
+        )
+
+        risk_chart = history_display.set_index("Analysis")[[
+            "risk_score"
+        ]].rename(columns={
+            "risk_score": "Risk Score (0–100)"
+        })
+
+        st.line_chart(
+            risk_chart,
+            use_container_width=True
+        )
+
+        # ---------------------------------------------------------
+        # LATEST VS PREVIOUS ANALYSIS
+        # ---------------------------------------------------------
+
+        if len(history_display) >= 2:
+            previous = history_display.iloc[-2]
+            latest = history_display.iloc[-1]
+
+            st.subheader("🔄 Latest vs Previous Analysis")
+            st.caption(
+                "This compares your most recent saved analysis with the analysis immediately before it."
+            )
+
+            def format_change(current, previous_value, unit=""):
+                change = float(current) - float(previous_value)
+                if change > 0:
+                    return f"↑ {change:.1f}{unit} increase"
+                if change < 0:
+                    return f"↓ {abs(change):.1f}{unit} decrease"
+                return "→ No change"
+
+            c1, c2, c3, c4 = st.columns(4)
+
+            with c1:
+                screen_change = float(latest["screen_time"]) - float(previous["screen_time"])
+                st.metric(
+                    "⏱️ Screen Time",
+                    f"{latest['screen_time']:.1f} hrs",
+                    delta=f"{screen_change:+.1f} hrs"
+                )
+
+            with c2:
+                social_change = float(latest["social_media_time"]) - float(previous["social_media_time"])
+                st.metric(
+                    "📱 Social Media",
+                    f"{latest['social_media_time']:.1f} hrs",
+                    delta=f"{social_change:+.1f} hrs"
+                )
+
+            with c3:
+                productivity_change = float(latest["productivity"]) - float(previous["productivity"])
+                st.metric(
+                    "🎯 Productivity",
+                    f"{int(latest['productivity'])}/5",
+                    delta=f"{productivity_change:+.0f} level"
+                )
+
+            with c4:
+                risk_change = float(latest["risk_score"]) - float(previous["risk_score"])
+                st.metric(
+                    "🧠 Risk Score",
+                    f"{int(latest['risk_score'])}/100",
+                    delta=f"{risk_change:+.0f} points"
+                )
+
+            st.markdown(
+                f"**Previous:** {previous['date'].strftime('%d %b %Y, %I:%M %p')}  "
+                f"  →  **Latest:** {latest['date'].strftime('%d %b %Y, %I:%M %p')}"
+            )
+
+            # Simple plain-language summary for quick understanding.
+            if screen_change < 0:
+                st.success(f"⏱️ Screen time decreased by {abs(screen_change):.1f} hours.")
+            elif screen_change > 0:
+                st.warning(f"⏱️ Screen time increased by {screen_change:.1f} hours.")
+            else:
+                st.info("⏱️ Screen time stayed the same.")
+
+            if social_change < 0:
+                st.success(f"📱 Social media time decreased by {abs(social_change):.1f} hours.")
+            elif social_change > 0:
+                st.warning(f"📱 Social media time increased by {social_change:.1f} hours.")
+            else:
+                st.info("📱 Social media time stayed the same.")
+
+            if productivity_change > 0:
+                st.success(f"🎯 Productivity increased by {productivity_change:.0f} level.")
+            elif productivity_change < 0:
+                st.warning(f"🎯 Productivity decreased by {abs(productivity_change):.0f} level.")
+            else:
+                st.info("🎯 Productivity stayed the same.")
+
+        else:
+            st.info(
+                "ℹ️ You have one saved analysis. Complete another analysis later "
+                "to see increase/decrease comparisons."
+            )
+
+        # ---------------------------------------------------------
+        # SAVED ANALYSIS TABLE
+        # ---------------------------------------------------------
+
+        st.subheader("📋 My Saved Analysis Records")
+
+        table = history_display[[
+            "date",
+            "screen_time",
+            "social_media_time",
+            "productivity",
+            "risk_level",
+            "risk_score"
+        ]].copy()
+
+        table.columns = [
+            "Analysis Date",
+            "Screen Time (hrs)",
+            "Social Media (hrs)",
+            "Productivity (1–5)",
+            "Risk Level",
+            "Risk Score"
+        ]
+
+        table["Analysis Date"] = table["Analysis Date"].dt.strftime(
+            "%d %b %Y, %I:%M %p"
+        )
 
         st.dataframe(
-            previous_data,
+            table,
             use_container_width=True,
             hide_index=True
         )
-
-    else:
-
-        st.info(
-            "No saved analysis yet."
-        )
-
-
-    # =========================================================
 
 elif page == "📥 Download":
 
@@ -1912,42 +2342,48 @@ elif page == "📥 Download":
 
 elif page == "🔐 Developer":
 
+    # =========================================================
+    # DEVELOPER PANEL
+    # =========================================================
+    # This page is unreachable for Student/Employee sessions
+    # because page is set to Developer only for role="Developer".
+
+    if st.session_state.get("role") != "Developer":
+        st.error("❌ Developer access denied.")
+        st.stop()
+
     show_page_header()
 
     st.subheader("🔐 Developer Panel")
 
-    developer_password = st.text_input(
-        "Developer Password",
-        type="password"
-    )
+    st.success("✅ Developer access granted")
 
-    if developer_password == "FocusGuard@123":
+    if not df.empty:
 
-        st.success("✅ Developer access granted")
+        st.subheader("🔐 Developer Dataset View")
 
-        if not df.empty:
-            st.subheader("🔐 Developer Dataset View")
-            st.dataframe(
-                df,
-                use_container_width=True
-            )
+        st.dataframe(
+            df,
+            use_container_width=True
+        )
 
-        st.divider()
-        st.subheader("🔐 All User Analysis")
+    st.divider()
 
-        all_data = get_all_analysis()
+    st.subheader("🔐 All User Analysis")
 
-        if not all_data.empty:
-            st.dataframe(
-                all_data,
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.info("No analysis data available.")
+    all_data = get_all_analysis()
 
-    elif developer_password:
-        st.error("❌ Incorrect password")
+    if not all_data.empty:
+
+        st.dataframe(
+            all_data,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+
+        st.info("No analysis data available.")
 
 
 # =========================================================
