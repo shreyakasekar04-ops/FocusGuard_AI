@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import time
 import re
 import io
 import requests
+from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from reportlab.lib.pagesizes import A4
@@ -79,14 +79,31 @@ def initialize_database():
     """)
 
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            activity TEXT,
-            duration INTEGER,
-            date TEXT
+    CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        activity TEXT,
+        duration INTEGER,
+        date TEXT,
+        reminder_time TEXT,
+        completed INTEGER DEFAULT 0
+    )
+""")
+
+    # Add new reminder columns to old databases
+    try:
+        cursor.execute(
+            "ALTER TABLE reminders ADD COLUMN reminder_time TEXT"
         )
-    """)
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute(
+            "ALTER TABLE reminders ADD COLUMN completed INTEGER DEFAULT 0"
+        )
+    except sqlite3.OperationalError:
+        pass
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS user_goals (
@@ -561,60 +578,75 @@ def get_smart_reminder_recommendation(username, daily_limit):
 # =========================================================
 # REMINDER FUNCTIONS
 # =========================================================
-
 def save_reminder(
     username,
     activity,
     duration
 ):
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO reminders
-        (
-            username,
-            activity,
-            duration,
-            date
-        )
-        VALUES (?, ?, ?, datetime('now'))
-    """, (
-        username,
-        activity,
-        duration
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_reminders(username):
-
-    conn = sqlite3.connect(DB_PATH)
-
-    result = pd.read_sql_query(
-        """
-        SELECT
-            id,
-            activity,
-            duration,
-            date
-        FROM reminders
-        WHERE username = ?
-        ORDER BY id DESC
-        """,
-        conn,
-        params=(username,)
+    response = requests.post(
+        "https://focusguard-ai-11.onrender.com/save_reminder",
+        json={
+            "username": username,
+            "activity": activity,
+            "duration": int(duration)
+        },
+        timeout=15
     )
 
-    conn.close()
+    if response.status_code != 200:
+        try:
+            message = response.json().get(
+                "message",
+                "Failed to save reminder"
+            )
+        except:
+            message = "Failed to save reminder"
 
-    return result
+        raise Exception(message)
 
+    return response.json()
+def get_reminders(username):
 
-# =========================================================
+    response = requests.get(
+        "https://focusguard-ai-11.onrender.com/user_reminders",
+        params={
+            "username": username
+        },
+        timeout=15
+    )
+
+    if response.status_code != 200:
+        return pd.DataFrame()
+
+    data = response.json()
+
+    reminders = data.get(
+        "reminders",
+        []
+    )
+
+    rows = []
+
+    for reminder in reminders:
+
+        trigger_time = datetime.fromtimestamp(
+            reminder["trigger_at_ms"] / 1000
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+        rows.append({
+            "id": reminder["id"],
+            "activity": reminder["activity"],
+            "duration": reminder["duration"],
+            "date": reminder["created_at"],
+            "reminder_time": trigger_time,
+            "completed": reminder.get(
+                "delivered",
+                0
+            )
+        })
+
+    return pd.DataFrame(rows)# =========================================================
 # AUTOMATIC DEVICE USAGE
 # =========================================================
 
@@ -1998,33 +2030,56 @@ elif page == "🔔 Smart Reminders":
             st.success(
                 f"✅ Custom reminder saved for {reminder_minutes} minutes."
             )
+        saved_reminders = get_reminders(username)
 
-    saved_reminders = get_reminders(username)
+        if not saved_reminders.empty:
 
-    if not saved_reminders.empty:
-        st.divider()
-        st.subheader("📋 My Saved Reminders")
+            st.divider()
+            st.subheader("📋 My Saved Reminders")
 
-        reminder_table = saved_reminders.copy()
-        reminder_table["date"] = pd.to_datetime(
-            reminder_table["date"],
-            errors="coerce"
-        )
-        reminder_table["date"] = reminder_table["date"].dt.strftime(
-            "%d %b %Y, %I:%M %p"
-        )
-        reminder_table.columns = [
-            "ID",
-            "Reminder",
-            "Duration (min)",
-            "Saved On"
-        ]
+            reminder_table = saved_reminders.copy()
 
-        st.dataframe(
-            reminder_table,
-            use_container_width=True,
-            hide_index=True
-        )
+            reminder_table["date"] = pd.to_datetime(
+                reminder_table["date"],
+                errors="coerce"
+            )
+
+            reminder_table["reminder_time"] = pd.to_datetime(
+                reminder_table["reminder_time"],
+                errors="coerce"
+            )
+
+            reminder_table["date"] = reminder_table["date"].dt.strftime(
+                "%d %b %Y, %I:%M %p"
+            )
+
+            reminder_table["reminder_time"] = reminder_table[
+                "reminder_time"
+            ].dt.strftime(
+                "%d %b %Y, %I:%M %p"
+            )
+
+            reminder_table["completed"] = reminder_table[
+                "completed"
+            ].map({
+                0: "⏳ Pending",
+                1: "✅ Completed"
+            })
+
+            reminder_table.columns = [
+                "ID",
+                "Reminder",
+                "Duration (min)",
+                "Saved On",
+                "Reminder Time",
+                "Status"
+            ]
+
+            st.dataframe(
+                reminder_table,
+                width="stretch",
+                hide_index=True
+            )
 
 
 elif page == "📜 History":
