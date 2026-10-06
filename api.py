@@ -1,7 +1,8 @@
 from flask import Flask, request, jsonify
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import os
+import time
 
 app = Flask(__name__)
 
@@ -35,6 +36,22 @@ def create_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             daily_limit REAL NOT NULL
+        )
+    """)
+
+    # =================================================
+    # REMINDERS
+    # =================================================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            activity TEXT NOT NULL,
+            duration INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            trigger_at_ms INTEGER NOT NULL,
+            delivered INTEGER DEFAULT 0
         )
     """)
 
@@ -97,10 +114,6 @@ def set_limit():
         conn.commit()
         conn.close()
 
-        print(
-            f"Daily Limit Saved: {username} = {daily_limit}"
-        )
-
         return jsonify({
             "status": "success",
             "username": username,
@@ -109,10 +122,7 @@ def set_limit():
 
     except Exception as e:
 
-        print(
-            "LIMIT API ERROR:",
-            str(e)
-        )
+        print("LIMIT API ERROR:", str(e))
 
         return jsonify({
             "status": "error",
@@ -172,6 +182,325 @@ def get_limit():
 
 
 # =================================================
+# SAVE CUSTOM REMINDER
+# =================================================
+
+@app.route("/save_reminder", methods=["POST"])
+def save_reminder():
+
+    try:
+
+        data = request.get_json()
+
+        if data is None:
+            return jsonify({
+                "status": "error",
+                "message": "No JSON data received"
+            }), 400
+
+        username = str(
+            data.get("username", "default_user")
+        ).strip()
+
+        activity = str(
+            data.get("activity", "Focus Session")
+        ).strip()
+
+        duration = int(
+            data.get("duration", 5)
+        )
+
+        if not username:
+            return jsonify({
+                "status": "error",
+                "message": "Username is required"
+            }), 400
+
+        if duration < 1 or duration > 120:
+            return jsonify({
+                "status": "error",
+                "message": "Duration must be between 1 and 120 minutes"
+            }), 400
+
+        # UTC timestamp for Android scheduling.
+        # Android converts this automatically to local phone time.
+        trigger_at_ms = int(
+            time.time() * 1000
+        ) + (duration * 60 * 1000)
+
+        # Human-readable IST timestamp.
+        created_at = datetime.now(
+            timezone.utc
+        ).astimezone().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT INTO reminders
+            (
+                username,
+                activity,
+                duration,
+                created_at,
+                trigger_at_ms,
+                delivered
+            )
+            VALUES (?, ?, ?, ?, ?, 0)
+        """, (
+            username,
+            activity,
+            duration,
+            created_at,
+            trigger_at_ms
+        ))
+
+        reminder_id = cursor.lastrowid
+
+        conn.commit()
+        conn.close()
+
+        print(
+            f"Reminder saved: "
+            f"{username} | "
+            f"{activity} | "
+            f"{duration} min"
+        )
+
+        return jsonify({
+            "status": "success",
+            "id": reminder_id,
+            "username": username,
+            "activity": activity,
+            "duration": duration,
+            "created_at": created_at,
+            "trigger_at_ms": trigger_at_ms
+        }), 200
+
+    except Exception as e:
+
+        print(
+            "REMINDER SAVE ERROR:",
+            str(e)
+        )
+
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+
+# =================================================
+# GET PENDING REMINDERS
+# =================================================
+
+@app.route("/pending_reminders", methods=["GET"])
+def pending_reminders():
+
+    try:
+
+        username = request.args.get(
+            "username",
+            "default_user"
+        )
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                id,
+                activity,
+                duration,
+                created_at,
+                trigger_at_ms
+            FROM reminders
+            WHERE username = ?
+              AND delivered = 0
+              AND trigger_at_ms > ?
+            ORDER BY trigger_at_ms ASC
+        """, (
+            username,
+            int(time.time() * 1000)
+        ))
+
+        rows = cursor.fetchall()
+
+        conn.close()
+
+        reminders = []
+
+        for row in rows:
+
+            reminders.append({
+
+                "id": row[0],
+
+                "activity": row[1],
+
+                "duration": row[2],
+
+                "created_at": row[3],
+
+                "trigger_at_ms": row[4]
+
+            })
+
+        return jsonify({
+
+            "status": "success",
+
+            "username": username,
+
+            "reminders": reminders
+
+        }), 200
+
+    except Exception as e:
+
+        print(
+            "PENDING REMINDER ERROR:",
+            str(e)
+        )
+
+        return jsonify({
+
+            "status": "error",
+
+            "message": str(e)
+
+        }), 500
+
+    # =================================================
+# GET ALL USER REMINDERS
+# =================================================
+
+@app.route("/user_reminders", methods=["GET"])
+def user_reminders():
+
+    try:
+
+        username = request.args.get(
+            "username",
+            "default_user"
+        )
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT
+                id,
+                activity,
+                duration,
+                created_at,
+                trigger_at_ms,
+                delivered
+            FROM reminders
+            WHERE username = ?
+            ORDER BY id DESC
+        """, (
+            username,
+        ))
+
+        rows = cursor.fetchall()
+
+        conn.close()
+
+        reminders = []
+
+        for row in rows:
+
+            reminders.append({
+
+                "id": row[0],
+
+                "activity": row[1],
+
+                "duration": row[2],
+
+                "created_at": row[3],
+
+                "trigger_at_ms": row[4],
+
+                "delivered": row[5]
+
+            })
+
+        return jsonify({
+
+            "status": "success",
+
+            "username": username,
+
+            "reminders": reminders
+
+        }), 200
+
+    except Exception as e:
+
+        print(
+            "USER REMINDERS ERROR:",
+            str(e)
+        )
+
+        return jsonify({
+
+            "status": "error",
+
+            "message": str(e)
+
+        }), 500
+
+
+# =================================================
+# MARK REMINDER DELIVERED
+# =================================================
+
+@app.route("/complete_reminder/<int:reminder_id>", methods=["POST"])
+def complete_reminder(reminder_id):
+
+    try:
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            UPDATE reminders
+            SET delivered = 1
+            WHERE id = ?
+        """, (
+            reminder_id,
+        ))
+
+        conn.commit()
+
+        updated = cursor.rowcount
+
+        conn.close()
+
+        return jsonify({
+
+            "status": "success",
+
+            "updated": updated
+
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({
+
+            "status": "error",
+
+            "message": str(e)
+
+        }), 500
+
+
+# =================================================
 # RECEIVE AND SAVE ANDROID USAGE
 # =================================================
 
@@ -218,33 +547,12 @@ def receive_usage():
 
         print("\n==============================")
         print("ANDROID USAGE RECEIVED")
-        print(
-            "Username:",
-            username
-        )
-        print(
-            "Screen Time:",
-            screen_time,
-            "minutes"
-        )
-        print(
-            "Social Media:",
-            social_media_time,
-            "minutes"
-        )
-        print(
-            "Productivity:",
-            productivity_time,
-            "minutes"
-        )
-        print(
-            "Productivity Level:",
-            productivity_level
-        )
-        print(
-            "App Usage:",
-            app_usage
-        )
+        print("Username:", username)
+        print("Screen Time:", screen_time)
+        print("Social Media:", social_media_time)
+        print("Productivity:", productivity_time)
+        print("Productivity Level:", productivity_level)
+        print("App Usage:", app_usage)
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -266,18 +574,15 @@ def receive_usage():
             social_media_time,
             productivity_time,
             productivity_level,
-            datetime.now().strftime(
+            datetime.now(
+                timezone.utc
+            ).astimezone().strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
         ))
 
         conn.commit()
         conn.close()
-
-        print(
-            "Usage data saved successfully"
-        )
-        print("==============================\n")
 
         return jsonify({
 
@@ -357,68 +662,47 @@ def latest_usage():
 
             return jsonify({
 
-                "status":
-                    "success",
+                "status": "success",
 
-                "username":
-                    username,
+                "username": username,
 
-                "screen_time":
-                    result[0],
+                "screen_time": result[0],
 
-                "social_media_time":
-                    result[1],
+                "social_media_time": result[1],
 
-                "productivity_time":
-                    result[2],
+                "productivity_time": result[2],
 
-                "productivity_level":
-                    result[3],
+                "productivity_level": result[3],
 
-                "date":
-                    result[4]
+                "date": result[4]
 
             }), 200
 
         return jsonify({
 
-            "status":
-                "success",
+            "status": "success",
 
-            "username":
-                username,
+            "username": username,
 
-            "screen_time":
-                0,
+            "screen_time": 0,
 
-            "social_media_time":
-                0,
+            "social_media_time": 0,
 
-            "productivity_time":
-                0,
+            "productivity_time": 0,
 
-            "productivity_level":
-                "LOW",
+            "productivity_level": "LOW",
 
-            "date":
-                None
+            "date": None
 
         }), 200
 
     except Exception as e:
 
-        print(
-            "LATEST USAGE ERROR:",
-            str(e)
-        )
-
         return jsonify({
 
-            "status":
-                "error",
+            "status": "error",
 
-            "message":
-                str(e)
+            "message": str(e)
 
         }), 500
 
