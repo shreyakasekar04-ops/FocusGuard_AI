@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import os
 import time
 
@@ -184,7 +184,6 @@ def get_limit():
 # =================================================
 # SAVE CUSTOM REMINDER
 # =================================================
-
 @app.route("/save_reminder", methods=["POST"])
 def save_reminder():
 
@@ -222,20 +221,41 @@ def save_reminder():
                 "message": "Duration must be between 1 and 120 minutes"
             }), 400
 
-        # UTC timestamp for Android scheduling.
-        # Android converts this automatically to local phone time.
-        trigger_at_ms = int(
-            time.time() * 1000
-        ) + (duration * 60 * 1000)
+        # ================================================
+        # EXACT FUTURE TIME
+        # ================================================
 
-        # Human-readable IST timestamp.
-        created_at = datetime.now(
+        now_ms = int(
+            time.time() * 1000
+        )
+
+        trigger_at_ms = (
+            now_ms +
+            (duration * 60 * 1000)
+        )
+
+        # ================================================
+        # INDIA TIME FOR SAVED ON
+        # ================================================
+
+        india_time = datetime.now(
             timezone.utc
-        ).astimezone().strftime(
+        ).astimezone(
+            timezone(
+                timedelta(hours=5, minutes=30)
+            )
+        )
+
+        created_at = india_time.strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 
+        # ================================================
+        # SAVE TO DATABASE
+        # ================================================
+
         conn = sqlite3.connect(DB_PATH)
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -260,23 +280,34 @@ def save_reminder():
         reminder_id = cursor.lastrowid
 
         conn.commit()
+
         conn.close()
 
         print(
             f"Reminder saved: "
             f"{username} | "
             f"{activity} | "
-            f"{duration} min"
+            f"{duration} min | "
+            f"IST: {created_at} | "
+            f"Trigger: {trigger_at_ms}"
         )
 
         return jsonify({
+
             "status": "success",
+
             "id": reminder_id,
+
             "username": username,
+
             "activity": activity,
+
             "duration": duration,
+
             "created_at": created_at,
+
             "trigger_at_ms": trigger_at_ms
+
         }), 200
 
     except Exception as e:
@@ -287,10 +318,12 @@ def save_reminder():
         )
 
         return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
 
+            "status": "error",
+
+            "message": str(e)
+
+        }), 500
 
 # =================================================
 # GET PENDING REMINDERS
