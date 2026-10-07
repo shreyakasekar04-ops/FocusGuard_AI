@@ -6,8 +6,49 @@ import time
 
 app = Flask(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "mobile_usage.db")
+# =================================================
+# CONFIGURATION
+# =================================================
+
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+DB_PATH = os.path.join(
+    BASE_DIR,
+    "mobile_usage.db"
+)
+
+# India Standard Time
+IST = timezone(
+    timedelta(hours=5, minutes=30)
+)
+
+
+# =================================================
+# DATABASE CONNECTION
+# =================================================
+
+def get_connection():
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    return conn
+
+
+# =================================================
+# CURRENT INDIA TIME
+# =================================================
+
+def get_india_time():
+
+    return datetime.now(
+        timezone.utc
+    ).astimezone(
+        IST
+    )
 
 
 # =================================================
@@ -16,25 +57,44 @@ DB_PATH = os.path.join(BASE_DIR, "mobile_usage.db")
 
 def create_database():
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_connection()
+
     cursor = conn.cursor()
+
+    # =================================================
+    # MOBILE USAGE
+    # =================================================
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mobile_usage (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+
             username TEXT,
+
             screen_time REAL NOT NULL,
+
             social_media_time REAL NOT NULL,
+
             productivity_time REAL DEFAULT 0,
+
             productivity_level TEXT DEFAULT 'LOW',
+
             date TEXT NOT NULL
         )
     """)
 
+    # =================================================
+    # SCREEN TIME LIMITS
+    # =================================================
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS screen_time_limits (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+
             username TEXT UNIQUE,
+
             daily_limit REAL NOT NULL
         )
     """)
@@ -45,17 +105,25 @@ def create_database():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+
             username TEXT NOT NULL,
+
             activity TEXT NOT NULL,
+
             duration INTEGER NOT NULL,
+
             created_at TEXT NOT NULL,
+
             trigger_at_ms INTEGER NOT NULL,
+
             delivered INTEGER DEFAULT 0
         )
     """)
 
     conn.commit()
+
     conn.close()
 
 
@@ -63,7 +131,7 @@ create_database()
 
 
 # =================================================
-# HOME
+# HOME / API STATUS
 # =================================================
 
 @app.route("/")
@@ -73,19 +141,38 @@ def home():
 
 
 # =================================================
-# SAVE DAILY SCREEN TIME LIMIT
+# SET DAILY SCREEN TIME LIMIT
 # =================================================
 
-@app.route("/set_limit", methods=["POST"])
+@app.route(
+    "/set_limit",
+    methods=["POST"]
+)
 def set_limit():
 
     try:
 
         data = request.get_json()
 
-        username = data.get("username")
+        if data is None:
+
+            return jsonify({
+                "status": "error",
+                "message": "No JSON data received"
+            }), 400
+
+        username = str(
+            data.get(
+                "username",
+                ""
+            )
+        ).strip()
+
         daily_limit = float(
-            data.get("daily_limit", 5)
+            data.get(
+                "daily_limit",
+                5
+            )
         )
 
         if not username:
@@ -95,38 +182,60 @@ def set_limit():
                 "message": "Username is required"
             }), 400
 
-        conn = sqlite3.connect(DB_PATH)
+        if daily_limit <= 0:
+
+            return jsonify({
+                "status": "error",
+                "message": "Daily limit must be greater than 0"
+            }), 400
+
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             INSERT INTO screen_time_limits
-            (username, daily_limit)
+            (
+                username,
+                daily_limit
+            )
             VALUES (?, ?)
 
             ON CONFLICT(username)
             DO UPDATE SET
-            daily_limit = excluded.daily_limit
+                daily_limit = excluded.daily_limit
         """, (
             username,
             daily_limit
         ))
 
         conn.commit()
+
         conn.close()
 
         return jsonify({
+
             "status": "success",
+
             "username": username,
+
             "daily_limit": daily_limit
+
         }), 200
 
     except Exception as e:
 
-        print("LIMIT API ERROR:", str(e))
+        print(
+            "SET LIMIT ERROR:",
+            str(e)
+        )
 
         return jsonify({
+
             "status": "error",
+
             "message": str(e)
+
         }), 500
 
 
@@ -134,7 +243,10 @@ def set_limit():
 # GET DAILY SCREEN TIME LIMIT
 # =================================================
 
-@app.route("/get_limit", methods=["GET"])
+@app.route(
+    "/get_limit",
+    methods=["GET"]
+)
 def get_limit():
 
     try:
@@ -144,12 +256,15 @@ def get_limit():
             "default_user"
         )
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT daily_limit
+
             FROM screen_time_limits
+
             WHERE username = ?
         """, (
             username,
@@ -162,29 +277,49 @@ def get_limit():
         if result:
 
             return jsonify({
+
                 "status": "success",
+
                 "username": username,
+
                 "daily_limit": result[0]
+
             }), 200
 
         return jsonify({
+
             "status": "success",
+
             "username": username,
+
             "daily_limit": 5
+
         }), 200
 
     except Exception as e:
 
+        print(
+            "GET LIMIT ERROR:",
+            str(e)
+        )
+
         return jsonify({
+
             "status": "error",
+
             "message": str(e)
+
         }), 500
 
 
 # =================================================
 # SAVE CUSTOM REMINDER
 # =================================================
-@app.route("/save_reminder", methods=["POST"])
+
+@app.route(
+    "/save_reminder",
+    methods=["POST"]
+)
 def save_reminder():
 
     try:
@@ -192,69 +327,98 @@ def save_reminder():
         data = request.get_json()
 
         if data is None:
+
             return jsonify({
+
                 "status": "error",
-                "message": "No JSON data received"
+
+                "message":
+                    "No JSON data received"
+
             }), 400
 
         username = str(
-            data.get("username", "default_user")
+            data.get(
+                "username",
+                "default_user"
+            )
         ).strip()
 
         activity = str(
-            data.get("activity", "Focus Session")
+            data.get(
+                "activity",
+                "Focus Session"
+            )
         ).strip()
 
         duration = int(
-            data.get("duration", 5)
+            data.get(
+                "duration",
+                5
+            )
         )
 
+        # -------------------------------------------------
+        # VALIDATION
+        # -------------------------------------------------
+
         if not username:
+
             return jsonify({
+
                 "status": "error",
-                "message": "Username is required"
+
+                "message":
+                    "Username is required"
+
             }), 400
+
+        if not activity:
+
+            activity = "Focus Session"
 
         if duration < 1 or duration > 120:
+
             return jsonify({
+
                 "status": "error",
-                "message": "Duration must be between 1 and 120 minutes"
+
+                "message":
+                    "Duration must be between 1 and 120 minutes"
+
             }), 400
 
-        # ================================================
-        # EXACT FUTURE TIME
-        # ================================================
+        # -------------------------------------------------
+        # EXACT FUTURE TIMESTAMP
+        # -------------------------------------------------
 
         now_ms = int(
             time.time() * 1000
         )
 
         trigger_at_ms = (
-            now_ms +
-            (duration * 60 * 1000)
-        )
-
-        # ================================================
-        # INDIA TIME FOR SAVED ON
-        # ================================================
-
-        india_time = datetime.now(
-            timezone.utc
-        ).astimezone(
-            timezone(
-                timedelta(hours=5, minutes=30)
+            now_ms
+            +
+            (
+                duration
+                * 60
+                * 1000
             )
         )
 
-        created_at = india_time.strftime(
+        # -------------------------------------------------
+        # INDIA TIME
+        # -------------------------------------------------
+
+        created_at = get_india_time().strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 
-        # ================================================
-        # SAVE TO DATABASE
-        # ================================================
+        # -------------------------------------------------
+        # SAVE REMINDER
+        # -------------------------------------------------
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
 
         cursor = conn.cursor()
 
@@ -284,36 +448,79 @@ def save_reminder():
         conn.close()
 
         print(
-            f"Reminder saved: "
-            f"{username} | "
-            f"{activity} | "
-            f"{duration} min | "
-            f"IST: {created_at} | "
-            f"Trigger: {trigger_at_ms}"
+            "\n=============================="
+        )
+
+        print(
+            "REMINDER SAVED"
+        )
+
+        print(
+            "ID:",
+            reminder_id
+        )
+
+        print(
+            "Username:",
+            username
+        )
+
+        print(
+            "Activity:",
+            activity
+        )
+
+        print(
+            "Duration:",
+            duration,
+            "minutes"
+        )
+
+        print(
+            "Created IST:",
+            created_at
+        )
+
+        print(
+            "Trigger:",
+            trigger_at_ms
+        )
+
+        print(
+            "==============================\n"
         )
 
         return jsonify({
 
             "status": "success",
 
-            "id": reminder_id,
+            "message":
+                "Reminder saved successfully",
 
-            "username": username,
+            "id":
+                reminder_id,
 
-            "activity": activity,
+            "username":
+                username,
 
-            "duration": duration,
+            "activity":
+                activity,
 
-            "created_at": created_at,
+            "duration":
+                duration,
 
-            "trigger_at_ms": trigger_at_ms
+            "created_at":
+                created_at,
+
+            "trigger_at_ms":
+                trigger_at_ms
 
         }), 200
 
     except Exception as e:
 
         print(
-            "REMINDER SAVE ERROR:",
+            "SAVE REMINDER ERROR:",
             str(e)
         )
 
@@ -325,11 +532,15 @@ def save_reminder():
 
         }), 500
 
+
 # =================================================
 # GET PENDING REMINDERS
 # =================================================
 
-@app.route("/pending_reminders", methods=["GET"])
+@app.route(
+    "/pending_reminders",
+    methods=["GET"]
+)
 def pending_reminders():
 
     try:
@@ -339,24 +550,39 @@ def pending_reminders():
             "default_user"
         )
 
-        conn = sqlite3.connect(DB_PATH)
+        current_time_ms = int(
+            time.time() * 1000
+        )
+
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
+
                 id,
+
                 activity,
+
                 duration,
+
                 created_at,
+
                 trigger_at_ms
+
             FROM reminders
+
             WHERE username = ?
+
               AND delivered = 0
+
               AND trigger_at_ms > ?
+
             ORDER BY trigger_at_ms ASC
         """, (
             username,
-            int(time.time() * 1000)
+            current_time_ms
         ))
 
         rows = cursor.fetchall()
@@ -369,25 +595,33 @@ def pending_reminders():
 
             reminders.append({
 
-                "id": row[0],
+                "id":
+                    row[0],
 
-                "activity": row[1],
+                "activity":
+                    row[1],
 
-                "duration": row[2],
+                "duration":
+                    row[2],
 
-                "created_at": row[3],
+                "created_at":
+                    row[3],
 
-                "trigger_at_ms": row[4]
+                "trigger_at_ms":
+                    row[4]
 
             })
 
         return jsonify({
 
-            "status": "success",
+            "status":
+                "success",
 
-            "username": username,
+            "username":
+                username,
 
-            "reminders": reminders
+            "reminders":
+                reminders
 
         }), 200
 
@@ -400,17 +634,23 @@ def pending_reminders():
 
         return jsonify({
 
-            "status": "error",
+            "status":
+                "error",
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
-    # =================================================
+
+# =================================================
 # GET ALL USER REMINDERS
 # =================================================
 
-@app.route("/user_reminders", methods=["GET"])
+@app.route(
+    "/user_reminders",
+    methods=["GET"]
+)
 def user_reminders():
 
     try:
@@ -420,19 +660,29 @@ def user_reminders():
             "default_user"
         )
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
+
                 id,
+
                 activity,
+
                 duration,
+
                 created_at,
+
                 trigger_at_ms,
+
                 delivered
+
             FROM reminders
+
             WHERE username = ?
+
             ORDER BY id DESC
         """, (
             username,
@@ -448,27 +698,36 @@ def user_reminders():
 
             reminders.append({
 
-                "id": row[0],
+                "id":
+                    row[0],
 
-                "activity": row[1],
+                "activity":
+                    row[1],
 
-                "duration": row[2],
+                "duration":
+                    row[2],
 
-                "created_at": row[3],
+                "created_at":
+                    row[3],
 
-                "trigger_at_ms": row[4],
+                "trigger_at_ms":
+                    row[4],
 
-                "delivered": row[5]
+                "delivered":
+                    row[5]
 
             })
 
         return jsonify({
 
-            "status": "success",
+            "status":
+                "success",
 
-            "username": username,
+            "username":
+                username,
 
-            "reminders": reminders
+            "reminders":
+                reminders
 
         }), 200
 
@@ -481,54 +740,89 @@ def user_reminders():
 
         return jsonify({
 
-            "status": "error",
+            "status":
+                "error",
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
 
 # =================================================
-# MARK REMINDER DELIVERED
+# COMPLETE REMINDER
 # =================================================
 
-@app.route("/complete_reminder/<int:reminder_id>", methods=["POST"])
+@app.route(
+    "/complete_reminder/<int:reminder_id>",
+    methods=["POST"]
+)
 def complete_reminder(reminder_id):
 
     try:
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             UPDATE reminders
+
             SET delivered = 1
+
             WHERE id = ?
         """, (
             reminder_id,
         ))
 
-        conn.commit()
-
         updated = cursor.rowcount
+
+        conn.commit()
 
         conn.close()
 
+        if updated == 0:
+
+            return jsonify({
+
+                "status":
+                    "error",
+
+                "message":
+                    "Reminder not found",
+
+                "updated":
+                    0
+
+            }), 404
+
         return jsonify({
 
-            "status": "success",
+            "status":
+                "success",
 
-            "updated": updated
+            "message":
+                "Reminder completed successfully",
+
+            "updated":
+                updated
 
         }), 200
 
     except Exception as e:
 
+        print(
+            "COMPLETE REMINDER ERROR:",
+            str(e)
+        )
+
         return jsonify({
 
-            "status": "error",
+            "status":
+                "error",
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
@@ -537,7 +831,10 @@ def complete_reminder(reminder_id):
 # RECEIVE AND SAVE ANDROID USAGE
 # =================================================
 
-@app.route("/usage", methods=["POST"])
+@app.route(
+    "/usage",
+    methods=["POST"]
+)
 def receive_usage():
 
     try:
@@ -547,48 +844,167 @@ def receive_usage():
         if data is None:
 
             return jsonify({
-                "status": "error",
-                "message": "No JSON data received"
+
+                "status":
+                    "error",
+
+                "message":
+                    "No JSON data received"
+
             }), 400
 
-        username = data.get(
-            "username",
-            "default_user"
-        )
+        # -------------------------------------------------
+        # USERNAME
+        # -------------------------------------------------
+
+        username = str(
+            data.get(
+                "username",
+                "default_user"
+            )
+        ).strip()
+
+        # -------------------------------------------------
+        # SCREEN TIME
+        # -------------------------------------------------
 
         screen_time = float(
-            data.get("screen_time", 0)
+            data.get(
+                "screen_time",
+                0
+            )
         )
+
+        # -------------------------------------------------
+        # SOCIAL MEDIA TIME
+        # -------------------------------------------------
 
         social_media_time = float(
-            data.get("social_media_time", 0)
+            data.get(
+                "social_media_time",
+                0
+            )
         )
+
+        # -------------------------------------------------
+        # PRODUCTIVITY TIME
+        #
+        # Accept both:
+        # productivity_time
+        # productivity
+        # -------------------------------------------------
 
         productivity_time = float(
-            data.get("productivity_time", 0)
+            data.get(
+                "productivity_time",
+                data.get(
+                    "productivity",
+                    0
+                )
+            )
         )
 
-        productivity_level = data.get(
-            "productivity_level",
-            "LOW"
-        )
+        # -------------------------------------------------
+        # PRODUCTIVITY LEVEL
+        #
+        # Accept:
+        # productivity_level
+        #
+        # If Android sends only productivity number,
+        # automatically calculate level.
+        # -------------------------------------------------
+
+        productivity_level = str(
+            data.get(
+                "productivity_level",
+                ""
+            )
+        ).upper().strip()
+
+        if productivity_level not in [
+            "LOW",
+            "MODERATE",
+            "HIGH"
+        ]:
+
+            if productivity_time >= 2:
+
+                productivity_level = "HIGH"
+
+            elif productivity_time >= 1:
+
+                productivity_level = "MODERATE"
+
+            else:
+
+                productivity_level = "LOW"
+
+        # -------------------------------------------------
+        # OPTIONAL APP USAGE
+        # -------------------------------------------------
 
         app_usage = data.get(
             "app_usage",
             []
         )
 
-        print("\n==============================")
-        print("ANDROID USAGE RECEIVED")
-        print("Username:", username)
-        print("Screen Time:", screen_time)
-        print("Social Media:", social_media_time)
-        print("Productivity:", productivity_time)
-        print("Productivity Level:", productivity_level)
-        print("App Usage:", app_usage)
+        # -------------------------------------------------
+        # PRINT RECEIVED DATA
+        # -------------------------------------------------
 
-        conn = sqlite3.connect(DB_PATH)
+        print(
+            "\n=============================="
+        )
+
+        print(
+            "ANDROID USAGE RECEIVED"
+        )
+
+        print(
+            "Username:",
+            username
+        )
+
+        print(
+            "Screen Time:",
+            screen_time
+        )
+
+        print(
+            "Social Media:",
+            social_media_time
+        )
+
+        print(
+            "Productivity Time:",
+            productivity_time
+        )
+
+        print(
+            "Productivity Level:",
+            productivity_level
+        )
+
+        print(
+            "App Usage:",
+            app_usage
+        )
+
+        print(
+            "==============================\n"
+        )
+
+        # -------------------------------------------------
+        # SAVE TO DATABASE
+        # -------------------------------------------------
+
+        conn = get_connection()
+
         cursor = conn.cursor()
+
+        date = get_india_time().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
 
         cursor.execute("""
             INSERT INTO mobile_usage
@@ -607,22 +1023,28 @@ def receive_usage():
             social_media_time,
             productivity_time,
             productivity_level,
-            datetime.now(
-                timezone.utc
-            ).astimezone().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            date
         ))
 
+        usage_id = cursor.lastrowid
+
         conn.commit()
+
         conn.close()
 
         return jsonify({
 
-            "status": "success",
+            "status":
+                "success",
 
             "message":
                 "Usage data saved successfully",
+
+            "id":
+                usage_id,
+
+            "username":
+                username,
 
             "screen_time":
                 screen_time,
@@ -634,20 +1056,24 @@ def receive_usage():
                 productivity_time,
 
             "productivity_level":
-                productivity_level
+                productivity_level,
+
+            "date":
+                date
 
         }), 200
 
     except Exception as e:
 
         print(
-            "API ERROR:",
+            "USAGE API ERROR:",
             str(e)
         )
 
         return jsonify({
 
-            "status": "error",
+            "status":
+                "error",
 
             "message":
                 str(e)
@@ -659,7 +1085,10 @@ def receive_usage():
 # GET LATEST ANDROID USAGE
 # =================================================
 
-@app.route("/latest_usage", methods=["GET"])
+@app.route(
+    "/latest_usage",
+    methods=["GET"]
+)
 def latest_usage():
 
     try:
@@ -669,19 +1098,29 @@ def latest_usage():
             "default_user"
         )
 
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_connection()
+
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
+
                 screen_time,
+
                 social_media_time,
+
                 productivity_time,
+
                 productivity_level,
+
                 date
+
             FROM mobile_usage
+
             WHERE username = ?
+
             ORDER BY id DESC
+
             LIMIT 1
         """, (
             username,
@@ -695,47 +1134,72 @@ def latest_usage():
 
             return jsonify({
 
-                "status": "success",
+                "status":
+                    "success",
 
-                "username": username,
+                "username":
+                    username,
 
-                "screen_time": result[0],
+                "screen_time":
+                    result[0],
 
-                "social_media_time": result[1],
+                "social_media_time":
+                    result[1],
 
-                "productivity_time": result[2],
+                "productivity_time":
+                    result[2],
 
-                "productivity_level": result[3],
+                "productivity_level":
+                    result[3],
 
-                "date": result[4]
+                "date":
+                    result[4]
 
             }), 200
 
+        # -------------------------------------------------
+        # NO DATA YET
+        # -------------------------------------------------
+
         return jsonify({
 
-            "status": "success",
+            "status":
+                "success",
 
-            "username": username,
+            "username":
+                username,
 
-            "screen_time": 0,
+            "screen_time":
+                0,
 
-            "social_media_time": 0,
+            "social_media_time":
+                0,
 
-            "productivity_time": 0,
+            "productivity_time":
+                0,
 
-            "productivity_level": "LOW",
+            "productivity_level":
+                "LOW",
 
-            "date": None
+            "date":
+                None
 
         }), 200
 
     except Exception as e:
 
+        print(
+            "LATEST USAGE ERROR:",
+            str(e)
+        )
+
         return jsonify({
 
-            "status": "error",
+            "status":
+                "error",
 
-            "message": str(e)
+            "message":
+                str(e)
 
         }), 500
 
@@ -747,7 +1211,20 @@ def latest_usage():
 if __name__ == "__main__":
 
     print(
+        "================================"
+    )
+
+    print(
         "FocusGuard AI API started"
+    )
+
+    print(
+        "Database:",
+        DB_PATH
+    )
+
+    print(
+        "================================"
     )
 
     app.run(
