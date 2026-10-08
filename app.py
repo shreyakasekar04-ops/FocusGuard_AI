@@ -605,7 +605,9 @@ def save_reminder(
         except:
             message = "Failed to save reminder"
 
-        raise Exception(message)
+        raise Exception(
+    f"API returned {response.status_code}: {response.text}"
+    )
 
     return response.json()
 def get_reminders(username):
@@ -649,9 +651,8 @@ def get_reminders(username):
         })
 
     return pd.DataFrame(rows)
-# =========================================================
-# AUTOMATIC DEVICE USAGE
-# =========================================================
+
+
 def get_automatic_device_usage():
 
     phone_screen = 0.0
@@ -659,12 +660,16 @@ def get_automatic_device_usage():
     phone_productivity = 0.0
     phone_productivity_level = "LOW"
 
+    # =============================
+    # PHONE DATA FROM API 11
+    # =============================
+
     try:
 
         username = st.session_state.get(
             "username",
             ""
-        ).strip()
+        ).strip().lower()
 
         if username:
 
@@ -707,9 +712,11 @@ def get_automatic_device_usage():
                     )
                 )
 
-                phone_productivity_level = phone_data.get(
-                    "productivity_level",
-                    "LOW"
+                phone_productivity_level = str(
+                    phone_data.get(
+                        "productivity_level",
+                        "LOW"
+                    )
                 )
 
     except Exception as e:
@@ -719,9 +726,9 @@ def get_automatic_device_usage():
             str(e)
         )
 
-    # -----------------------------
+    # =============================
     # LAPTOP DATA
-    # -----------------------------
+    # =============================
 
     laptop_screen = 0.0
     laptop_social = 0.0
@@ -760,65 +767,32 @@ def get_automatic_device_usage():
                 laptop_df.iloc[0]["social_minutes"]
             )
 
-        except Exception:
+        except Exception as e:
 
-            laptop_screen = 0.0
-            laptop_social = 0.0
+            print(
+                "LAPTOP DATA ERROR:",
+                str(e)
+            )
 
         finally:
 
             conn.close()
 
-    laptop_screen_hours = laptop_screen / 60
-    laptop_social_hours = laptop_social / 60
+    # =============================
+    # MINUTES → HOURS
+    # =============================
 
-    # IMPORTANT:
-    # Current API value 116.03 represents minutes.
-    # Convert it to hours for dashboard.
-
-    phone_screen_hours = phone_screen / 60
-    phone_social_hours = phone_social / 60
-    phone_productivity_hours = phone_productivity / 60
-
-    combined_screen_hours = (
-        phone_screen_hours
-        + laptop_screen_hours
+    phone_screen_hours = (
+        phone_screen / 60
     )
 
-    combined_social_hours = (
-        phone_social_hours
-        + laptop_social_hours
+    phone_social_hours = (
+        phone_social / 60
     )
 
-    return {
-        "phone_screen":
-            phone_screen_hours,
-
-        "phone_social":
-            phone_social_hours,
-
-        "phone_productivity_time":
-            phone_productivity_hours,
-
-        "phone_productivity_level":
-            phone_productivity_level,
-
-        "laptop_screen":
-            laptop_screen_hours,
-
-        "laptop_social":
-            laptop_social_hours,
-
-        "combined_screen":
-            combined_screen_hours,
-
-        "combined_social":
-            combined_social_hours
-    }
-
-    # -------------------------------------------------
-    # CONVERT LAPTOP MINUTES TO HOURS
-    # -------------------------------------------------
+    phone_productivity_hours = (
+        phone_productivity / 60
+    )
 
     laptop_screen_hours = (
         laptop_screen / 60
@@ -828,21 +802,9 @@ def get_automatic_device_usage():
         laptop_social / 60
     )
 
-
-    # -------------------------------------------------
-    # PHONE VALUES ARE ALREADY HOURS
-    # -------------------------------------------------
-
-    phone_screen_hours = phone_screen
-
-    phone_social_hours = phone_social
-
-    phone_productivity_hours = phone_productivity
-
-
-    # -------------------------------------------------
-    # COMBINED DEVICE USAGE
-    # -------------------------------------------------
+    # =============================
+    # COMBINED USAGE
+    # =============================
 
     combined_screen_hours = (
         phone_screen_hours
@@ -854,10 +816,9 @@ def get_automatic_device_usage():
         + laptop_social_hours
     )
 
-
-    # -------------------------------------------------
+    # =============================
     # RETURN DATA
-    # -------------------------------------------------
+    # =============================
 
     return {
 
@@ -1278,7 +1239,7 @@ if page == "🏠 Dashboard":
     with col1:
         st.metric(
             "📱 Phone Screen",
-            f"{phone_screen_hours:.2f} hrs"
+            f"{phone_screen_hours * 60:.0f} min"
         )
 
     with col2:
@@ -1290,7 +1251,7 @@ if page == "🏠 Dashboard":
     with col3:
         st.metric(
             "📱 Social Media",
-            f"{combined_social_hours:.2f} hrs"
+            f"{combined_social_hours * 60:.0f} min"
         )
 
     with col4:
