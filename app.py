@@ -5,7 +5,7 @@ import os
 import re
 import io
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from reportlab.lib.pagesizes import A4
