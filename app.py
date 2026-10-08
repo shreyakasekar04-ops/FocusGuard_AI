@@ -634,8 +634,10 @@ def get_reminders(username):
 
     for reminder in reminders:
 
+        # Convert reminder timestamp to IST
         trigger_time = datetime.fromtimestamp(
-            reminder["trigger_at_ms"] / 1000
+            reminder["trigger_at_ms"] / 1000,
+            tz=timezone(timedelta(hours=5, minutes=30))
         ).strftime("%Y-%m-%d %H:%M:%S")
 
         rows.append({
@@ -643,15 +645,10 @@ def get_reminders(username):
             "activity": reminder["activity"],
             "duration": reminder["duration"],
             "date": reminder["created_at"],
-            "reminder_time": trigger_time,
-            "completed": reminder.get(
-                "delivered",
-                0
-            )
+            "reminder_time": trigger_time
         })
 
     return pd.DataFrame(rows)
-
 
 def get_automatic_device_usage():
 
@@ -2518,3 +2515,4 @@ if page in all_page_options:
             st.info(
                 "Complete your analysis first, then click Next →"
             )
+
