@@ -652,12 +652,7 @@ def get_reminders(username):
 # =========================================================
 # AUTOMATIC DEVICE USAGE
 # =========================================================
-
 def get_automatic_device_usage():
-
-    # -------------------------------------------------
-    # PHONE DATA FROM PUBLIC RENDER API
-    # -------------------------------------------------
 
     phone_screen = 0.0
     phone_social = 0.0
@@ -668,56 +663,54 @@ def get_automatic_device_usage():
 
         username = st.session_state.get(
             "username",
-            "default_user"
-        )
+            ""
+        ).strip()
 
-        response = requests.get(
-            f"{API_BASE_URL}/latest_usage",
-            params={
-                "username": username
-            },
-            timeout=30
-        )
+        if username:
 
-        if response.status_code == 200:
+            response = requests.get(
+                f"{API_BASE_URL}/latest_usage",
+                params={
+                    "username": username
+                },
+                timeout=30
+            )
 
-            phone_data = response.json()
+            print(
+                "STREAMLIT API:",
+                response.status_code,
+                response.text
+            )
 
-            # API already stores these values in HOURS.
-            # DO NOT divide them by 60.
+            if response.status_code == 200:
 
-            phone_screen = float(
-                phone_data.get(
-                    "screen_time",
-                    0
+                phone_data = response.json()
+
+                phone_screen = float(
+                    phone_data.get(
+                        "screen_time",
+                        0
+                    )
                 )
-            )
 
-            phone_social = float(
-                phone_data.get(
-                    "social_media_time",
-                    0
+                phone_social = float(
+                    phone_data.get(
+                        "social_media_time",
+                        0
+                    )
                 )
-            )
 
-            phone_productivity = float(
-                phone_data.get(
-                    "productivity_time",
-                    0
+                phone_productivity = float(
+                    phone_data.get(
+                        "productivity_time",
+                        0
+                    )
                 )
-            )
 
-            phone_productivity_level = phone_data.get(
-                "productivity_level",
-                "LOW"
-            )
-
-        else:
-
-            phone_screen = 0.0
-            phone_social = 0.0
-            phone_productivity = 0.0
-            phone_productivity_level = "LOW"
+                phone_productivity_level = phone_data.get(
+                    "productivity_level",
+                    "LOW"
+                )
 
     except Exception as e:
 
@@ -726,22 +719,12 @@ def get_automatic_device_usage():
             str(e)
         )
 
-        phone_screen = 0.0
-        phone_social = 0.0
-        phone_productivity = 0.0
-        phone_productivity_level = "LOW"
-
-
-    # -------------------------------------------------
+    # -----------------------------
     # LAPTOP DATA
-    # -------------------------------------------------
+    # -----------------------------
 
     laptop_screen = 0.0
     laptop_social = 0.0
-
-    # Laptop database is local to Streamlit.
-    # It is optional, so the app continues even
-    # when the database does not exist.
 
     if os.path.exists(MOBILE_USAGE_DB):
 
@@ -779,37 +762,59 @@ def get_automatic_device_usage():
 
         except Exception:
 
-            # Older laptop table may not have
-            # social_minutes column.
-
-            try:
-
-                laptop_df = pd.read_sql_query(
-                    """
-                    SELECT
-                        COALESCE(
-                            SUM(usage_minutes),
-                            0
-                        ) AS usage_minutes
-
-                    FROM laptop_usage
-                    """,
-                    conn
-                )
-
-                laptop_screen = float(
-                    laptop_df.iloc[0]["usage_minutes"]
-                )
-
-            except Exception:
-
-                laptop_screen = 0.0
-                laptop_social = 0.0
+            laptop_screen = 0.0
+            laptop_social = 0.0
 
         finally:
 
             conn.close()
 
+    laptop_screen_hours = laptop_screen / 60
+    laptop_social_hours = laptop_social / 60
+
+    # IMPORTANT:
+    # Current API value 116.03 represents minutes.
+    # Convert it to hours for dashboard.
+
+    phone_screen_hours = phone_screen / 60
+    phone_social_hours = phone_social / 60
+    phone_productivity_hours = phone_productivity / 60
+
+    combined_screen_hours = (
+        phone_screen_hours
+        + laptop_screen_hours
+    )
+
+    combined_social_hours = (
+        phone_social_hours
+        + laptop_social_hours
+    )
+
+    return {
+        "phone_screen":
+            phone_screen_hours,
+
+        "phone_social":
+            phone_social_hours,
+
+        "phone_productivity_time":
+            phone_productivity_hours,
+
+        "phone_productivity_level":
+            phone_productivity_level,
+
+        "laptop_screen":
+            laptop_screen_hours,
+
+        "laptop_social":
+            laptop_social_hours,
+
+        "combined_screen":
+            combined_screen_hours,
+
+        "combined_social":
+            combined_social_hours
+    }
 
     # -------------------------------------------------
     # CONVERT LAPTOP MINUTES TO HOURS
