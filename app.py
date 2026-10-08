@@ -2079,12 +2079,6 @@ elif page == "🔔 Smart Reminders":
                 "%d %b %Y, %I:%M %p"
             )
 
-            reminder_table["completed"] = reminder_table[
-                "completed"
-            ].map({
-                0: "⏳ Pending",
-                1: "✅ Completed"
-            })
 
             reminder_table.columns = [
                 "ID",
@@ -2515,4 +2509,3 @@ if page in all_page_options:
             st.info(
                 "Complete your analysis first, then click Next →"
             )
-
