@@ -2079,14 +2079,12 @@ elif page == "🔔 Smart Reminders":
                 "%d %b %Y, %I:%M %p"
             )
 
-
             reminder_table.columns = [
                 "ID",
-                "Reminder",
+                "Activity",
                 "Duration (min)",
                 "Saved On",
-                "Reminder Time",
-                "Status"
+                "Reminder Time"
             ]
 
             st.dataframe(
